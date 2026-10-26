@@ -1,0 +1,7 @@
+numpy
+sounddevice
+onnx-asr[cpu,hub]
+ctranslate2
+transformers
+sentencepiece
+huggingface_hub
