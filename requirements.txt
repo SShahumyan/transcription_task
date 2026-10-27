@@ -1,7 +1,11 @@
 numpy
 sounddevice
+PyAudioWPatch
+soxr
 onnx-asr[cpu,hub]
 ctranslate2
 transformers
 sentencepiece
 huggingface_hub
+sherpa-onnx
+faster-whisper
