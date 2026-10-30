@@ -15,6 +15,7 @@ os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 
 from hyen.asr import ASR_MODELS, Transcriber
 from hyen.audio import LoopbackStream, MicStream
+from hyen.speakers import SpeakerTracker
 from hyen.translate import MT_MODELS, Translator
 from hyen.vad import Segment, Segmenter
 
@@ -35,21 +36,26 @@ def capture(label: str, stream, segmenter: Segmenter, segments: queue.Queue, sto
         segments.put((label, seg, stream.started_at))
 
 
-def process(label: str, seg: Segment, stream_start: float, session_start: float, transcriber, translator):
+def process(
+    label: str, seg: Segment, stream_start: float, session_start: float, transcriber, translator, speakers
+):
     t0 = time.perf_counter()
     hy = transcriber.transcribe(seg.audio)
     t1 = time.perf_counter()
     if not hy:
-        return
-    en = translator.translate(hy)
+        return  # noise, coughs etc. never reach the speaker tracker, so they can't create a speaker
+    if label == "Call":
+        label = speakers.identify(seg.audio)
     t2 = time.perf_counter()
+    en = translator.translate(hy)
+    t3 = time.perf_counter()
 
     # Latency as the brief defines it: from the end of the spoken phrase to the printed line.
     phrase_end = stream_start + seg.end
     latency = time.monotonic() - phrase_end
     print(
-        f"[{format_elapsed(phrase_end - session_start)}] {label:<4}  HY: {hy}  EN: {en}"
-        f"   (asr {t1 - t0:.2f}s, mt {t2 - t1:.2f}s, lat {latency:.1f}s)",
+        f"[{format_elapsed(phrase_end - session_start)}] {label:<9}  HY: {hy}  EN: {en}"
+        f"   (asr {t1 - t0:.2f}s, spk {t2 - t1:.2f}s, mt {t3 - t2:.2f}s, lat {latency:.1f}s)",
         flush=True,
     )
 
@@ -66,6 +72,9 @@ def main() -> None:
     parser.add_argument(
         "--max-segment", type=float, default=12.0, help="force a cut after this many seconds"
     )
+    parser.add_argument(
+        "--speaker-threshold", type=float, default=0.55, help="voice similarity to count as the same speaker"
+    )
     args = parser.parse_args()
 
     sys.stdout.reconfigure(encoding="utf-8")
@@ -73,6 +82,7 @@ def main() -> None:
     print("Loading models...", flush=True)
     transcriber = Transcriber(args.asr_model, threads=args.threads)
     translator = Translator(args.mt_model, threads=args.threads)
+    speakers = SpeakerTracker(threshold=args.speaker_threshold, threads=args.threads)
     sources = {"Me": MicStream(), "Call": LoopbackStream()}
 
     segments: queue.Queue = queue.Queue()
@@ -104,13 +114,13 @@ def main() -> None:
                 item = segments.get(timeout=0.5)  # a timeout keeps Ctrl+C responsive on Windows
             except queue.Empty:
                 continue
-            process(*item, session_start, transcriber, translator)
+            process(*item, session_start, transcriber, translator, speakers)
     except KeyboardInterrupt:
         stop.set()
         for t in threads:
             t.join(timeout=2)
         while not segments.empty():
-            process(*segments.get(), session_start, transcriber, translator)
+            process(*segments.get(), session_start, transcriber, translator, speakers)
         print(f"\nStopped after {format_elapsed(time.monotonic() - session_start)}.")
 
 
