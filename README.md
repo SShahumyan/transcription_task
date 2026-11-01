@@ -1,70 +1,156 @@
-# Live Armenian → English transcription (prototype)
+# Live Armenian → English transcription
 
-Status: **prototype**. It listens to the default microphone ("Me") and to what the computer plays, e.g. the other side
-of a video call, where people are told apart as "Speaker 1", "Speaker 2", …). Both streams are split into phrases at pauses (voice activity detection); each phrase is
-transcribed in Armenian and translated to English. Everything runs locally on CPU; no audio or text leaves the machine.
+A Python command-line program that listens to a live conversation, such as a video call, transcribes spoken Armenian
+and prints an English translation in the terminal, labelled by speaker:
 
-## Setup (Windows, Python 3.11+)
+- your microphone is labelled **`Me`**
+- what the computer plays (the other side of the call) is split by voice into **`Speaker 1`, `Speaker 2`, …**
+
+Everything runs locally on the CPU. After the one-time model download no audio or text leaves the machine, and it
+works with Wi-Fi off.
+
+```
+[00:00:24] Speaker 2  HY: Արժանապատվություն հասկացությունը պատմական տարբեր ժամամանակահատվածներում տարբեր բովանդակություն է ունեցել։  EN: The concept of dignity has had different meanings at different times in history.   (asr 0.29s, spk 0.10s, mt 0.88s, lat 1.9s)
+```
+
+Each line shows the time the phrase ended (since the program started), the speaker, the Armenian original and the
+English translation. The part in brackets shows how long each stage took and `lat`, the time from the end of the
+phrase to the printed line (the brief's limit is 5 s; measured 1.3–2.7 s).
+
+## Setup
+
+Tested on Windows 10, Python 3.12, Intel i5-8265U (4 cores), 16 GB RAM, no GPU. Windows only: system audio is captured
+with WASAPI loopback.
 
 ```
 python -m venv venv
 venv\Scripts\pip install -r requirements.txt
 ```
 
-Models are downloaded on first run (~1 GB) into the Hugging Face cache, and the VAD model (~2 MB) into `models/`.
-Nothing is stored in the repo.
+No PyTorch is needed: the models run on ONNX Runtime, CTranslate2 and sherpa-onnx. On the first run the models are
+downloaded (about 1 GB in total): ASR and translation models into the Hugging Face cache (`~/.cache/huggingface`), the
+VAD and speaker models (about 30 MB) into `models/`. Nothing is stored in the repository.
 
 ## Run
+
+Use Windows Terminal; the classic console may not render Armenian script.
 
 ```
 venv\Scripts\python -m hyen.main
 ```
 
-Options: `--asr-model fastconformer|whisper`, `--mt-model 600m|1.3b`, `--threads 0`, `--vad-threshold 0.5`, `--min-silence 0.5` (pause that ends a
-phrase), `--max-segment 12` (force a cut after this many seconds of continuous speech), `--speaker-threshold 0.55`
-(voice similarity to count as the same speaker; lower = fewer, larger speaker groups).
-Use Windows Terminal; the classic console may not render Armenian script.
+Startup takes a few seconds (model loading). It then prints the devices it records and `Listening. Ctrl+C to stop.`
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--asr-model fastconformer\|whisper` | `fastconformer` | Speech recognition model (Whisper is too slow on this CPU; kept for comparison) |
+| `--mt-model 600m\|1.3b` | `600m` | NLLB translation model size |
+| `--speaker-threshold` | `0.55` | Voice similarity needed to count as the same speaker. Lower: fewer, larger speaker groups |
+| `--vad-threshold` | `0.5` | Speech probability for voice activity detection |
+| `--min-silence` | `0.5` | Pause in seconds that ends a phrase |
+| `--max-segment` | `12` | Force a cut after this many seconds of continuous speech |
+| `--threads` | `0` (auto) | CPU threads for the models |
 
 ## Audio setup
 
-- **Me** = the Windows default microphone. **Call** = the Windows default output device (speakers/headphones),
-  recorded with WASAPI loopback, Windows' built-in way to record what a device plays. No virtual audio driver is
-  needed (the Windows equivalent of BlackHole on macOS), and you still hear the call as usual.
-- The startup lines show which devices are used:
+- **`Me`** is the Windows default microphone. **The call side** is the Windows default output device (speakers or
+  headphones), recorded with WASAPI loopback, Windows' built-in way to record what a device plays. This is the Windows
+  equivalent of BlackHole on macOS, except that no virtual audio driver and no Multi-Output Device are needed: you
+  keep hearing the call as usual.
+- The startup lines show which devices are recorded:
   ```
   Me    <- Microphone Array (Realtek(R) Au
   Call  <- Speakers (Realtek(R) Audio) [Loopback]
   ```
-- **For a Zoom / Google Meet call:** plug in headphones *before* starting the program (the default output device is
-  picked at startup) and leave the call app's speaker setting on the system default. The call app plays the other
-  participants to that device, so they appear as `Speaker N`; it doesn't play your own voice back, so you appear only as `Me`.
-- **Use headphones.** The call app's echo cancellation only cleans its own copy of the microphone, not ours; through
+  To use other devices, set them as the Windows defaults (Sound settings) before starting.
+- **For a Zoom / Google Meet call:**
+  1. Plug in headphones *before* starting the program (the default output device is picked at startup).
+  2. Leave the call app's speaker setting on the system default ("Same as system").
+  3. The call app plays the other participants to that device, so they appear as `Speaker N`. It doesn't play your
+     own voice back, so you appear only as `Me`.
+- **Use headphones.** The call app's echo cancellation only cleans its own copy of the microphone, not ours. Through
   speakers, the other participants can reach the microphone and be printed a second time as `Me`.
 - Everything the output device plays is captured, so mute notification sounds and close other audio (videos, music).
-- Testing without other people: play Armenian recordings on the computer; they are captured exactly like a call.
+- Testing without other people: play Armenian recordings on the computer. They are captured exactly like a call.
 
-Output, one line per phrase:
+## Architecture
 
 ```
-[00:00:24] Speaker 2  HY: Արժանապատվություն հասկացությունը պատմական տարբեր ժամամանակահատվածներում տարբեր բովանդակություն է ունեցել։  EN: The concept of dignity has had different meanings at different times in history.   (asr 0.29s, spk 0.10s, mt 0.88s, lat 1.9s)
+mic ───────► MicStream ──────► Segmenter (VAD) ─┐
+                                                ├─► queue ─► worker: ASR ─► speaker ID ─► translation ─► print
+output ────► LoopbackStream ─► Segmenter (VAD) ─┘                       (call side only)
+(loopback)
 ```
 
-The timestamp is when the phrase ended, since the program started. `lat` is the time from the end of the phrase to the
-printed line (the brief's limit is 5 s). Measured 1.3–2.7 s on Common Voice clips played through the speakers.
+- **Capture** (`hyen/audio.py`): one thread per source. `MicStream` uses sounddevice. `LoopbackStream` uses
+  PyAudioWPatch, downmixes the device's native format (usually 48 kHz stereo) to 16 kHz mono with soxr, and fills gaps
+  with silence: WASAPI delivers no data while nothing plays, and without the fill the VAD would never see the pause
+  that ends a phrase.
+- **Segmentation** (`hyen/vad.py`): Silero VAD cuts each stream into phrases at pauses. Phrases are re-cut from a
+  rolling buffer with 0.3 s padding, because Silero tends to clip the first syllable.
+- **Worker** (`hyen/main.py`): the main thread takes phrases from both sources in the order they end and processes
+  them one at a time, because all models share the same 4 CPU cores. Phrases where ASR finds no words (noise, coughs)
+  are dropped before speaker identification, so they never create a speaker.
+- **ASR** (`hyen/asr.py`), **translation** (`hyen/translate.py`), **speaker identification** (`hyen/speakers.py`):
+  each behind a small interface (`transcribe(audio) -> str`, `translate(text) -> str`, `identify(audio) -> label`), so
+  models can be swapped independently.
 
-How it works: each source has its own capture thread and VAD; finished phrases from both go into one queue, and a
-single worker runs ASR → (call side only) speaker identification → translation → print, one phrase at a time, since
-all models share the CPU.
+## Models and why
 
-## Speaker identification
+| Stage | Model | Runtime | Licence |
+|---|---|---|---|
+| ASR | [nvidia/stt_hy_fastconformer_hybrid_large_pc](https://huggingface.co/nvidia/stt_hy_fastconformer_hybrid_large_pc), CTC decoder ([ONNX export](https://huggingface.co/OpenVoiceOS/stt_hy_fastconformer_hybrid_large_pc_onnx)) | onnx-asr / ONNX Runtime | CC-BY-4.0 |
+| Translation | [NLLB-200 distilled 600M](https://huggingface.co/facebook/nllb-200-distilled-600M), int8 ([CT2 conversion](https://huggingface.co/pulkitchowdry/nllb-600m-ct2-int8)); 1.3B optional ([CT2](https://huggingface.co/michaelfeil/ct2fast-nllb-200-distilled-1.3B)) | CTranslate2 | **CC-BY-NC-4.0** (non-commercial) |
+| VAD | [Silero VAD](https://github.com/snakers4/silero-vad) | sherpa-onnx | MIT |
+| Speaker embeddings | [3D-Speaker CAM++](https://github.com/modelscope/3D-Speaker) zh+en "common advanced" ([sherpa-onnx export](https://github.com/k2-fsa/sherpa-onnx/releases/tag/speaker-recongition-models)) | sherpa-onnx | see model page |
+
+### Speech recognition
+
+Armenian is low-resource, and model cards are optimistic. I chose by the independent
+[ArmBench-ASR](https://metric-ai-armbench-asr.static.hf.space/) leaderboard (WER, lower is better). Cloud models
+(Gemini, ElevenLabs, …) score best but are not allowed here. Among open models:
+
+| Model | Overall WER | Conversational ("Movies") WER | On this CPU |
+|---|---|---|---|
+| **NVIDIA FastConformer hy (chosen)** | **19.9%** | **61%** | 0.2–0.4 s per phrase |
+| SeamlessM4T v2 large | 28.9% | 80% | too slow (2.3B params) |
+| Chillarmo whisper-large-v3-turbo-armenian | 33.0% | 82% | 15–17 s per phrase |
+| Meta Omnilingual ASR (300M–3B) | 38–51% | 79–92% | slow |
+| MMS-1B | 47.5% | 83% | – |
+| stock Whisper large-v3 | 65.1% | 106% | – |
+
+FastConformer is both the most accurate open model and fast enough by a wide margin. The Whisper fine-tune is kept
+behind `--asr-model whisper` because it was the obvious alternative and I measured it: it always encodes a 30 s
+window and decodes token by token, so live latency grew from 17 s to 61 s within 6 phrases, and it invented a long
+sentence from 3 s of noise. [BuzzASR/armenian](https://huggingface.co/BuzzASR/armenian) (a Whisper-large-v3 fine-tune)
+reports very low WER on read speech but isn't on ArmBench and is even larger, so it can't run live here either.
+
+### Translation
+
+NLLB-200 is a dedicated translation model covering Armenian, small enough for CPU when quantised to int8 with
+CTranslate2 (0.4–1.6 s per sentence for 600M). The 1.3B version is one flag away (`--mt-model 1.3b`) for better
+quality at higher latency. Alternatives considered:
+
+- **NLLB 3.3B, MADLAD-400 3B:** likely better, but several times slower; would eat most of the 5 s budget on this CPU.
+- **LLMs (TranslateGemma 4B, Armenian-adapted Gemma):** more fluent and more tolerant of messy ASR output, but token
+  by token generation on a laptop CPU is risky for the 5 s budget, and there were reports of TranslateGemma inserting
+  and repeating text in Armenian.
+- **End-to-end speech translation (SeamlessM4T v2):** one model instead of two, but its Armenian recognition is
+  clearly worse than FastConformer and it is too large for live use here.
+
+### Voice activity detection
+
+Silero VAD, the standard small VAD, run through sherpa-onnx (the `silero-vad` pip package needs PyTorch). Without VAD
+the first prototype cut fixed 5 s chunks, which split words, and the ASR made up short phrases from pure noise.
+
+### Speaker identification
 
 No enrollment: the tracker starts empty and learns voices during the call. Each call-side phrase is turned into a
-voiceprint (a 192-number speaker embedding) by a small local model. It is compared (cosine similarity) with the average
-voiceprint of every speaker heard so far: ≥ 0.55 → that speaker (and their average is updated), otherwise a new
-`Speaker N`. Phrases where ASR finds no words (noise, coughs) are not printed and never reach this step. Cost:
-0.05–0.17 s per phrase.
+voiceprint (a 192-number speaker embedding). It is compared (cosine similarity) with the average voiceprint of every
+speaker heard so far: if the best match is ≥ 0.55 it gets that speaker's label (and their average is updated),
+otherwise it becomes a new `Speaker N`. Cost: 0.05–0.17 s per phrase.
 
-Model choice, measured on 72 Common Voice clips (12 speakers × 6, cut by our VAD):
+The model was chosen by measurement on 72 Common Voice clips (12 speakers × 6 clips, cut by our VAD):
 
 | Speaker model (sherpa-onnx exports) | Same speaker, median similarity | Different speakers, median / 95th pct |
 |---|---|---|
@@ -72,51 +158,56 @@ Model choice, measured on 72 Common Voice clips (12 speakers × 6, cut by our VA
 | 3D-Speaker CAM++ VoxCeleb (English) | 0.63 | 0.42 / 0.85 |
 | WeSpeaker ResNet34 VoxCeleb (English) | 0.84 | 0.65 / 0.82 |
 
-The two English VoxCeleb models barely separate these Armenian speakers; the zh+en model (trained on far more
-speakers) does. The threshold was chosen by replaying 300 simulated calls (2–4 random speakers, shuffled turns, empty tracker at the
-start): at 0.55, ~95% of lines get the right label; the typical error is one odd phrase getting an extra label of its
-own. A deliberately bad first phrase (noise at 5 dB SNR) cost little (92% of lines right): it becomes a one-off extra
-label and the person's later phrases form their real speaker. Tried and dropped for simplicity: a minimum phrase
-length for creating speakers and merging of near-duplicate speakers (no measurable gain in the simulation). Live test (3 speakers, 12 phrases through the
-speakers): 11/12 correct; the miss was a new female speaker's first phrase given to the other female speaker.
+The two models trained on VoxCeleb (~7k mostly English speakers) barely separate Armenian speakers; the model trained
+on ~200k speakers does. pyannote was not used: its pipeline needs PyTorch and gated downloads, works on whole files
+rather than live, and its embedding model is the WeSpeaker ResNet34 above.
 
-## Models (current)
+The threshold was chosen by replaying 300 simulated calls (2–4 random speakers, shuffled turns, empty tracker at the
+start): at 0.55, ~95% of lines get the right label. The typical error is one unusual phrase getting an extra label of
+its own. A deliberately bad first phrase (noise at 5 dB SNR) still gave 92%: it becomes a one-off extra label, and the
+person's later phrases form their real speaker. A minimum phrase length for new speakers and merging of near-duplicate
+speakers were tried and dropped for simplicity (no measurable gain). Live test with 3 speakers and 12 phrases played
+through the speakers: 11/12 correct; the miss was a new female speaker's first phrase given to the other female speaker.
 
-| Stage | Model | Runtime |
-|---|---|---|
-| ASR | [nvidia/stt_hy_fastconformer_hybrid_large_pc](https://huggingface.co/nvidia/stt_hy_fastconformer_hybrid_large_pc) (CTC, via [ONNX export](https://huggingface.co/OpenVoiceOS/stt_hy_fastconformer_hybrid_large_pc_onnx)) | onnx-asr / ONNX Runtime |
-| MT | NLLB-200 distilled 600M, int8 ([CT2 conversion](https://huggingface.co/pulkitchowdry/nllb-600m-ct2-int8)); 1.3B optional | CTranslate2 |
-| VAD | [Silero VAD](https://github.com/snakers4/silero-vad) | sherpa-onnx |
-| Speaker embeddings | [3D-Speaker CAM++](https://github.com/modelscope/3D-Speaker) zh+en common advanced ([sherpa-onnx export](https://github.com/k2-fsa/sherpa-onnx/releases/tag/speaker-recongition-models)) | sherpa-onnx |
-| ASR (alternative, `--asr-model whisper`) | [Chillarmo/whisper-large-v3-turbo-armenian](https://huggingface.co/Chillarmo/whisper-large-v3-turbo-armenian) ([CT2 conversion](https://huggingface.co/hurricup/whisper-large-v3-turbo-armenian-ct2), int8 on load) | faster-whisper |
+## How it was tested
 
-### ASR comparison (first measurements, Intel i5-8265U, 4 cores, CPU only)
+The laptop microphone does not reliably pick up its own speakers, so the call side was tested by playing Armenian
+Common Voice clips through the speakers: WASAPI loopback captures them digitally, exactly like call audio. Results:
 
-| | FastConformer (default) | Whisper-turbo Armenian |
-|---|---|---|
-| Time to transcribe a 6–7 s clip | 0.2 s | 15–17 s (thread count makes no difference) |
-| Phrase end → printed line, live pipeline | 1.3–1.5 s, stable | 17 s rising to 61 s after 6 phrases (falls behind) |
-| 2 Common Voice clips | 1 wrong word | 2 wrong words in one clip, 1 in the other |
-| 3 s of background noise | short made-up phrase (2 words) | long made-up sentence, took 30 s |
-| [ArmBench-ASR](https://metric-ai-armbench-asr.static.hf.space/) overall WER | 19.9% | 33.0% |
+| Test | Result |
+|---|---|
+| 4 clips, call side | correct lines, lat 1.4–2.4 s; transcripts near-perfect |
+| 20 s with nothing playing | no false lines |
+| Clips with real gaps (nothing playing in between) | every phrase still ends and prints; timestamps match playback |
+| 3 speakers × 4 phrases, shuffled | 11/12 speaker labels right, lat 1.3–2.7 s |
+| Whisper-turbo vs FastConformer, live | Whisper falls behind (17 → 61 s); FastConformer 1.3–1.5 s |
 
-Whisper always encodes a 30 s window and decodes token by token, which this CPU can't do in real time. It's kept
-as an option for comparison only. Two clips are not a benchmark; a larger evaluation is planned.
+## Known limitations
 
-Model choices, alternatives and benchmarks will be documented here in phase 2. Note: NLLB is licensed CC-BY-NC.
-
-## Prototype limitations
-
-- Phrases are cut at pauses of 0.5 s or longer. Speech with no pause for 12 s is force-cut, which can split a word.
-- Silero VAD tends to clip the first syllable, so each phrase is padded with 0.3 s of audio on both sides. A quiet
-  first syllable is sometimes still lost.
-- Speakers: two people talking without a 0.5 s pause in between, or at the same time, end up in one phrase with one
-  label. Similar voices can share a label, and an unusual or very short phrase can get an extra label; printed lines
-  are never relabelled. The threshold was tuned on read speech (Common Voice); Zoom/Meet audio compression may shift it
+- **Recognition of live conversation is much worse than of test recordings.** Clean read speech (Common Voice) is
+  transcribed almost perfectly, but in a real meeting test both the Armenian transcript and the English translation
+  were poor. This matches ArmBench, where even the best open model gets ~61% of words wrong on conversational speech.
+  Translation can't recover from recognition errors. Possible contributors not yet separated: spontaneous speech,
+  Windows microphone "enhancements", microphone distance, call-app audio compression, phrases cut at short pauses.
+- **Speakers:** two people talking without a 0.5 s pause in between, or at the same time, end up in one phrase with
+  one label. Similar voices can share a label, and an unusual or very short phrase can get an extra label. Printed
+  lines are never relabelled. The threshold was tuned on read speech; call audio may need a different value
   (`--speaker-threshold`).
-- Always the default microphone and output device; no device selection. Switching the output device while running
-  (e.g. plugging in headphones) is not followed.
-- Through speakers instead of headphones, the call audio leaks into the mic and produces junk `Me` lines (seen in
-  tests: single letters like "Կ։"). Echo handling is out of scope; use headphones.
-- Phrases from both sources are processed one at a time; if many phrases end at once, later ones wait (visible in `lat`).
-- Transcription quality on live microphone speech is noticeably worse than on clean test recordings (not yet investigated).
+- **Devices:** always the Windows default microphone and output device; there is no device list or device flags yet
+  (the brief asks for them). Switching the output device while running (e.g. plugging in headphones) is not followed.
+- **Segmentation:** phrases are cut at pauses of 0.5 s or more; speech with no pause for 12 s is force-cut, which can
+  split a word. Silero VAD sometimes still clips a quiet first syllable.
+- **Throughput:** phrases are processed one at a time. If many phrases end at once, later ones wait (visible in `lat`).
+
+## What I would improve with more time
+
+1. **Record and replay:** save the raw audio of real calls locally and replay it through the pipeline, to find which
+   stage fails on live speech and to compare models on real call audio instead of read speech.
+2. **Evaluation harness:** WER/CER for ASR and chrF for translation on FLEURS Armenian (which has English references),
+   plus latency percentiles, to compare NLLB 600M / 1.3B / 3.3B and FastConformer's second (RNNT) decoder, which
+   should be about 1 point better in WER.
+3. **Device selection:** `--list-devices`, `--mic`, `--output` flags.
+4. **Speaker robustness:** compare other embedding models (ERes2NetV2, NVIDIA TitaNet) and tune the threshold on
+   real call audio.
+5. Drop junk ASR outputs (one or two letters) that come from echo or noise.
+6. Implement merging of embeddings in the case when the same person has more then one embedding
